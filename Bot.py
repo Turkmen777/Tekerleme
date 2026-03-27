@@ -5,7 +5,7 @@ import logging
 import sys
 import os
 from datetime import datetime, timedelta
-from io import BytesIO
+from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -36,13 +36,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Сектора колеса
+# Сектора колеса (только 4 сектора)
 SECTORS = [
-    {"name": "0 TMT", "color": (200, 200, 200), "type": "prize", "value": 0, "probability": 90},
-    {"name": "Promo5 TMT", "color": (100, 200, 255), "type": "prize", "value": 5, "probability": 1},
-    {"name": "Promo10 TMT", "color": (255, 215, 0), "type": "prize", "value": 10, "probability": 0.5},
-    {"name": "Promo20 TMT", "color": (255, 165, 0), "type": "prize", "value": 20, "probability": 0.5},
-    {"name": "Depozit +10%", "color": (255, 105, 180), "type": "bonus", "value": 10, "probability": 8}
+    {"name": "0 TMT", "color": (200, 200, 200), "type": "lose", "value": 0},
+    {"name": "5 TMT", "color": (100, 200, 255), "type": "win", "value": 5},
+    {"name": "10 TMT", "color": (255, 215, 0), "type": "win", "value": 10},
+    {"name": "20 TMT", "color": (255, 165, 0), "type": "win", "value": 20}
 ]
 
 # Инициализация бота
@@ -50,11 +49,16 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Глобальный счетчик для отслеживания проигрышей
+# Будем хранить в БД общий счетчик проигрышей
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def init_db():
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
+        
+        # Таблица пользователей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -66,17 +70,31 @@ def init_db():
                 spins_count INTEGER DEFAULT 0
             )
         ''')
-        conn.commit()
         
+        # Таблица истории выигрышей
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS spin_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
-                prize_type TEXT,
                 prize_value INTEGER,
                 spin_date TEXT
             )
         ''')
+        
+        # Таблица для глобального счетчика проигрышей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS global_counter (
+                id INTEGER PRIMARY KEY,
+                lose_count INTEGER DEFAULT 0,
+                last_win_cycle INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # Инициализируем глобальный счетчик
+        cursor.execute("SELECT COUNT(*) FROM global_counter")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO global_counter (id, lose_count, last_win_cycle) VALUES (1, 0, 0)")
+        
         conn.commit()
         conn.close()
         logger.info("База данных успешно инициализирована")
@@ -118,16 +136,43 @@ def update_user(user_id, balance, total_won, last_spin, spins_count):
         logger.error(f"Ошибка обновления пользователя: {e}")
         return False
 
-def save_spin_history(user_id, prize_type, prize_value):
+def save_spin_history(user_id, prize_value):
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO spin_history (user_id, prize_type, prize_value, spin_date) VALUES (?, ?, ?, ?)",
-                      (user_id, prize_type, prize_value, datetime.now().isoformat()))
+        cursor.execute("INSERT INTO spin_history (user_id, prize_value, spin_date) VALUES (?, ?, ?)",
+                      (user_id, prize_value, datetime.now().isoformat()))
         conn.commit()
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка сохранения истории: {e}")
+
+def get_global_counter():
+    """Получить глобальный счетчик проигрышей"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT lose_count, last_win_cycle FROM global_counter WHERE id = 1")
+        result = cursor.fetchone()
+        conn.close()
+        return result if result else (0, 0)
+    except Exception as e:
+        logger.error(f"Ошибка получения счетчика: {e}")
+        return 0, 0
+
+def update_global_counter(lose_count, last_win_cycle):
+    """Обновить глобальный счетчик проигрышей"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE global_counter SET lose_count = ?, last_win_cycle = ? WHERE id = 1", 
+                      (lose_count, last_win_cycle))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка обновления счетчика: {e}")
+        return False
 
 def can_spin(user_id, last_spin_str):
     if not last_spin_str:
@@ -138,14 +183,32 @@ def can_spin(user_id, last_spin_str):
     except:
         return True
 
-def get_random_sector():
-    rand_num = random.uniform(0, 100)
-    cumulative = 0
-    for sector in SECTORS:
-        cumulative += sector["probability"]
-        if rand_num <= cumulative:
-            return sector
-    return SECTORS[0]
+def get_prize_by_counter(lose_count):
+    """
+    Определяет какой приз выпадает на основе счетчика проигрышей
+    Возвращает: (prize_value, is_win)
+    """
+    # Определяем какой цикл выигрыша сейчас (начиная с 0)
+    # Циклы: 0-39 проигрыш, 40-й выигрыш 5, 41-79 проигрыш, 80-й выигрыш 10, 81-119 проигрыш, 120-й выигрыш 20
+    # 121-159 проигрыш, 160-й выигрыш 5, 161-199 проигрыш, 200-й выигрыш 10, 201-239 проигрыш, 240-й выигрыш 20 и т.д.
+    
+    # Номер текущего спина (начиная с 1)
+    spin_number = lose_count + 1
+    
+    # Проверяем, является ли текущий спин выигрышным
+    # Выигрышные спины: 40, 80, 120, 160, 200, 240, 280...
+    if spin_number % 40 == 0:
+        # Определяем какой по счету выигрыш (1-й, 2-й, 3-й...)
+        win_cycle = spin_number // 40
+        # Цикл выигрышей: 1->5, 2->10, 3->20, 4->5, 5->10, 6->20, 7->5...
+        if win_cycle % 3 == 1:
+            return 5, True  # 5 TMT
+        elif win_cycle % 3 == 2:
+            return 10, True  # 10 TMT
+        else:
+            return 20, True  # 20 TMT
+    else:
+        return 0, False  # Проигрыш
 
 # --- ГЕНЕРАЦИЯ КОЛЕСА ---
 def draw_wheel(selected_index, win_text):
@@ -161,12 +224,12 @@ def draw_wheel(selected_index, win_text):
         start_angle = -90
         
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-            big_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 36)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+            big_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
         except:
             try:
-                font = ImageFont.truetype("arial.ttf", 20)
-                big_font = ImageFont.truetype("arial.ttf", 36)
+                font = ImageFont.truetype("arial.ttf", 24)
+                big_font = ImageFont.truetype("arial.ttf", 40)
             except:
                 font = ImageFont.load_default()
                 big_font = ImageFont.load_default()
@@ -208,7 +271,7 @@ def draw_wheel(selected_index, win_text):
         for line in lines:
             bbox = draw.textbbox((center[0], y_offset), line, font=big_font)
             draw.text((center[0] - (bbox[2]-bbox[0])//2, y_offset), line, fill="black", font=big_font)
-            y_offset += 35
+            y_offset += 45
         
         return img
     except Exception as e:
@@ -241,7 +304,8 @@ async def start_command(message: types.Message):
             "Sizi günlik tekerleme oýnuna çagyrýarys!\n\n"
             "✨ *Düzgünler:*\n"
             "• Her gün 1 gezek aýlap bilersiňiz\n"
-            "• Baýraklar: 0 TMT, Promo 5 TMT, Promo 10 TMT, Promo 20 TMT, Depozit +10%\n\n"
+            "• Astra kassa siz bilendir\n"
+            "• Baýraklar: 5 TMT, 10 TMT, 20 TMT\n\n"
             "Aşakdaky düwmä basyp, tekerleme aýlaň! 🎡"
         )
         
@@ -258,24 +322,30 @@ async def show_wins(callback: types.CallbackQuery):
         
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT prize_type, prize_value, spin_date FROM spin_history WHERE user_id = ? ORDER BY spin_date DESC LIMIT 10", (user_id,))
+        cursor.execute("SELECT prize_value, spin_date FROM spin_history WHERE user_id = ? AND prize_value > 0 ORDER BY spin_date DESC LIMIT 20", (user_id,))
         history = cursor.fetchall()
+        
+        # Получаем общую статистику
+        cursor.execute("SELECT SUM(prize_value) FROM spin_history WHERE user_id = ? AND prize_value > 0", (user_id,))
+        total_won = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM spin_history WHERE user_id = ? AND prize_value = 0", (user_id,))
+        total_lose = cursor.fetchone()[0] or 0
+        
         conn.close()
         
         if not history:
             text = "🏆 *Siziň ýeňiş taryhyňyz:*\n\nHiç hili ýeňiş ýok.\n\nTekerleme aýlap görüň! 🎡"
         else:
-            text = "🏆 *Soňky 10 ýeňiş:*\n\n"
-            for prize_type, prize_value, spin_date in history:
+            text = f"🏆 *Ýeňiş statistikasy:*\n\n"
+            text += f"💰 Jemi ýeňiş: {total_won} TMT\n"
+            text += f"🎡 Jemi aýlanma: {total_lose + len(history)}\n"
+            text += f"🎉 Ýeňiş sany: {len(history)}\n\n"
+            text += "*Soňky 20 ýeňiş:*\n"
+            for prize_value, spin_date in history:
                 date_obj = datetime.fromisoformat(spin_date)
                 date_str = date_obj.strftime("%d.%m.%Y %H:%M")
-                if prize_type == "prize":
-                    if prize_value > 0:
-                        text += f"🎉 +{prize_value} TMT - {date_str}\n"
-                    else:
-                        text += f"😞 0 TMT - {date_str}\n"
-                else:
-                    text += f"⭐ Depozit +10% - {date_str}\n"
+                text += f"🎉 +{prize_value} TMT - {date_str}\n"
         
         await callback.message.edit_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         await callback.answer()
@@ -308,84 +378,63 @@ async def spin_wheel(callback: types.CallbackQuery):
         
         await callback.answer("🎡 Tekerleme aýlanýar...")
         
-        # Выбираем сектор
-        selected_sector = get_random_sector()
-        selected_index = SECTORS.index(selected_sector)
+        # Получаем глобальный счетчик
+        lose_count, last_win_cycle = get_global_counter()
         
-        # Обрабатываем результат
-        result_text = ""
-        win_text = ""
-        reward = 0
+        # Определяем выигрыш на основе счетчика
+        prize_value, is_win = get_prize_by_counter(lose_count)
         
-        if selected_sector["type"] == "prize":
-            reward = selected_sector["value"]
-            balance += reward
-            total_won += reward
-            spins_count += 1
+        # Обновляем баланс
+        if is_win:
+            balance += prize_value
+            total_won += prize_value
+            win_text = f"+{prize_value}\nTMT"
+            result_text = f"🎉 *Siz {prize_value} TMT gazandyňyz!* 🎉"
             
-            if reward > 0:
-                win_text = f"+{reward}\nTMT"
-                result_text = f"🎉 *Siz {reward} TMT gazandyňyz!* 🎉"
-                # Отправляем уведомление в группу
-                try:
-                    await bot.send_message(
-                        GROUP_ID,
-                        f"🎉 *Ýeňiş!* 🎉\n\n"
-                        f"👤 @{username} ({full_name})\n"
-                        f"💰 {reward} TMT gazandy!\n"
-                        f"🏆 Promo{reward} TMT\n\n"
-                        f"Balans doldurmak üçin: @astra_kassa"
-                    )
-                except:
-                    logger.warning("Не удалось отправить сообщение в группу")
-            else:
-                win_text = "0\nTMT"
-                result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
-                # Отправляем уведомление в группу
-                try:
-                    await bot.send_message(
-                        GROUP_ID,
-                        f"😞 *Şowsuzlyk!* 😞\n\n"
-                        f"👤 @{username} ({full_name})\n"
-                        f"💰 0 TMT gazandy!\n\n"
-                        f"Ertir täzeden synanyşar!"
-                    )
-                except:
-                    logger.warning("Не удалось отправить сообщение в группу")
-        
-        elif selected_sector["type"] == "bonus":
-            reward = 5
-            balance += reward
-            total_won += reward
-            spins_count += 1
-            win_text = "+10%\nBonus"
-            result_text = f"⭐ *Depozit +10% bonus gazandyňyz!* ⭐\nBalansyňyza 5 TMT goşuldy!\n\nDepozit edeniňizde +10% goşmaça alarsyňyz!"
             # Отправляем уведомление в группу
             try:
                 await bot.send_message(
                     GROUP_ID,
-                    f"⭐ *Bonus!* ⭐\n\n"
+                    f"🎉 *Ýeňiş!* 🎉\n\n"
                     f"👤 @{username} ({full_name})\n"
-                    f"🎁 Depozit +10% bonus gazandy!\n"
-                    f"💰 +5 TMT balansyna goşuldy!\n\n"
-                    f"Gutlaýarys! 🎉"
+                    f"💰 {prize_value} TMT gazandy!\n"
+                    f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
+                    f"Balans doldurmak üçin: @astra_kassa"
                 )
             except:
                 logger.warning("Не удалось отправить сообщение в группу")
+        else:
+            prize_value = 0
+            win_text = "0\nTMT"
+            result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
+        
+        # Находим индекс сектора для отображения
+        if prize_value == 0:
+            selected_index = 0  # 0 TMT
+        elif prize_value == 5:
+            selected_index = 1  # 5 TMT
+        elif prize_value == 10:
+            selected_index = 2  # 10 TMT
+        else:
+            selected_index = 3  # 20 TMT
+        
+        spins_count += 1
         
         # Рисуем колесо
         wheel_img = draw_wheel(selected_index, win_text)
         
-        # Сохраняем в БД
-        save_spin_history(user_id, selected_sector["type"], selected_sector["value"] if selected_sector["type"] == "prize" else 0)
+        # Сохраняем историю
+        save_spin_history(user_id, prize_value)
         update_user(user_id, balance, total_won, datetime.now().isoformat(), spins_count)
+        
+        # Обновляем глобальный счетчик
+        new_lose_count = lose_count + 1
+        update_global_counter(new_lose_count, last_win_cycle)
         
         # Отправляем результат
         if wheel_img:
-            # Сохраняем временный файл
             wheel_img.save(WHEEL_IMAGE_PATH)
             
-            # Создаем новое сообщение с фото, а не редактируем старое
             await callback.message.delete()
             await callback.message.answer_photo(
                 photo=FSInputFile(WHEEL_IMAGE_PATH),
@@ -394,13 +443,11 @@ async def spin_wheel(callback: types.CallbackQuery):
                 parse_mode="Markdown"
             )
             
-            # Удаляем временный файл
             try:
                 os.remove(WHEEL_IMAGE_PATH)
             except:
                 pass
         else:
-            # Если не удалось создать изображение, отправляем текст
             await callback.message.edit_text(
                 f"{result_text}\n\n"
                 f"💰 *Täze balans:* {balance} TMT\n"
@@ -409,16 +456,16 @@ async def spin_wheel(callback: types.CallbackQuery):
                 parse_mode="Markdown"
             )
         
-        # Если выигрыш больше 0, отправляем дополнительное сообщение с контактом админа
-        if reward > 0:
+        # Если выигрыш, отправляем сообщение с контактом админа
+        if is_win:
             await callback.message.answer(
                 f"🎉 *Gutlaýarys!* 🎉\n\n"
-                f"Siz {reward} TMT gazandyňyz!\n\n"
+                f"Siz {prize_value} TMT gazandyňyz!\n\n"
                 f"📞 *Balansyňyzy almak üçin* @astra_kassa bilen habarlaşyň!",
                 parse_mode="Markdown"
             )
         
-        logger.info(f"Пользователь {user_id} выиграл {reward} TMT")
+        logger.info(f"Пользователь {user_id} - Спин #{new_lose_count} - Выигрыш: {prize_value} TMT")
         
     except Exception as e:
         logger.error(f"Ошибка в spin_wheel: {e}", exc_info=True)
@@ -429,6 +476,64 @@ async def spin_wheel(callback: types.CallbackQuery):
         await callback.answer("⚠️ Ýalňyşlyk boldy!", show_alert=True)
 
 # --- АДМИН КОМАНДЫ ---
+@dp.message(Command("stats"))
+async def show_stats(message: types.Message):
+    if message.from_user.id != 8210954671:
+        await message.answer("⛔ Bu buýruk diňe administrator üçin!")
+        return
+    
+    try:
+        lose_count, last_win_cycle = get_global_counter()
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT SUM(balance) FROM users")
+        total_balance = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT SUM(total_won) FROM users")
+        total_won_all = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM spin_history WHERE prize_value > 0")
+        total_wins = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM spin_history")
+        total_spins = cursor.fetchone()[0] or 0
+        
+        conn.close()
+        
+        # Определяем следующий выигрыш
+        next_win_spin = ((lose_count // 40) + 1) * 40
+        remaining = next_win_spin - lose_count
+        
+        win_cycle = (next_win_spin // 40)
+        if win_cycle % 3 == 1:
+            next_prize = 5
+        elif win_cycle % 3 == 2:
+            next_prize = 10
+        else:
+            next_prize = 20
+        
+        text = (
+            f"📊 *Global statistika:*\n\n"
+            f"👥 Ulanyjylar: {total_users}\n"
+            f"💰 Umumy balans: {total_balance} TMT\n"
+            f"🏆 Jemi ýeňişler: {total_won_all} TMT\n"
+            f"🎡 Jemi aýlanmalar: {total_spins}\n"
+            f"🎉 Jemi ýeňişler: {total_wins}\n\n"
+            f"📈 *Tekerleme statistikasy:*\n"
+            f"🔄 Jemi aýlanma: {lose_count}\n"
+            f"🎁 Indiki ýeňiş: {remaining} aýlanmadan soň\n"
+            f"💰 Indiki baýrak: {next_prize} TMT"
+        )
+        
+        await message.answer(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Ошибка в show_stats: {e}")
+        await message.answer("⚠️ Ýalňyşlyk!")
+
 @dp.message(Command("add"))
 async def add_balance(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -486,6 +591,21 @@ async def add_balance(message: types.Message):
         logger.error(f"Ошибка в add_balance: {e}")
         await message.answer("⚠️ Ýalňyşlyk boldy!")
 
+@dp.message(Command("reset"))
+async def reset_counter(message: types.Message):
+    """Сбросить глобальный счетчик (только для админа)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Bu buýruk diňe administrator üçin!")
+        return
+    
+    try:
+        update_global_counter(0, 0)
+        await message.answer("✅ Global hasaplaýjy sıfyrlandy!")
+        logger.info("Глобальный счетчик сброшен администратором")
+    except Exception as e:
+        logger.error(f"Ошибка сброса счетчика: {e}")
+        await message.answer("⚠️ Ýalňyşlyk boldy!")
+
 # --- ЗАПУСК ---
 async def main():
     logger.info("🚀 Запуск бота Astra Kassa Tekerleme...")
@@ -502,19 +622,10 @@ async def main():
         print("="*50 + "\n")
         return
     
-    if GROUP_ID == -100123456789:
-        logger.warning("⚠️ Не установлен GROUP_ID!")
-        print("\n" + "="*50)
-        print("⚠️  ВНИМАНИЕ: Не установлен ID группы для уведомлений!")
-        print("1. Добавьте бота в группу")
-        print("2. Напишите /start в группе")
-        print("3. Получите ID группы (например через @getmyid_bot)")
-        print("4. Укажите GROUP_ID в файле bot.py")
-        print("="*50 + "\n")
-    
+    lose_count, _ = get_global_counter()
     logger.info(f"✅ Бот запущен")
     logger.info(f"👑 Администратор ID: {ADMIN_ID}")
-    logger.info(f"📢 Группа для уведомлений ID: {GROUP_ID}")
+    logger.info(f"📊 Текущий счетчик проигрышей: {lose_count}")
     
     try:
         await dp.start_polling(bot)
