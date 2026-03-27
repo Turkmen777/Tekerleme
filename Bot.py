@@ -241,7 +241,7 @@ async def start_command(message: types.Message):
             "Sizi günlik tekerleme oýnuna çagyrýarys!\n\n"
             "✨ *Düzgünler:*\n"
             "• Her gün 1 gezek aýlap bilersiňiz\n"
-            "• Baýraklar: 0 TMT, Promo5 TMT, Promo10 TMT, Promo20 TMT, Depozit +10%\n\n"
+            "• Baýraklar: 0 TMT, Promo 5 TMT, Promo 10 TMT, Promo 20 TMT, Depozit +10%\n\n"
             "Aşakdaky düwmä basyp, tekerleme aýlaň! 🎡"
         )
         
