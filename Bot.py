@@ -4,6 +4,7 @@ import sqlite3
 import logging
 import sys
 import os
+import re
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types
@@ -47,6 +48,14 @@ SECTORS = [
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ЭКРАНИРОВАНИЯ ТЕКСТА ---
+def escape_markdown(text):
+    """Экранирует специальные символы для Markdown"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def init_db():
@@ -264,19 +273,22 @@ def main_menu_keyboard():
     ])
     return kb
 
-# --- ФУНКЦИЯ ОТПРАВКИ В ГРУППУ ---
-async def send_to_group(text, parse_mode="Markdown"):
-    """Отправка сообщения в группу"""
+# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОТПРАВКИ В ГРУППУ (БЕЗ MARKDOWN) ---
+async def send_to_group(text):
+    """Отправка сообщения в группу без Markdown"""
     try:
-        await bot.send_message(GROUP_ID, text, parse_mode=parse_mode)
+        # Отправляем обычным текстом, без форматирования
+        await bot.send_message(GROUP_ID, text, parse_mode=None)
         logger.info(f"Сообщение отправлено в группу")
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки в группу: {e}")
-        try:
-            await bot.send_message(ADMIN_ID, f"⚠️ Ошибка отправки в группу!\n\n{e}")
-        except:
-            pass
+        # Отправляем ошибку админу только если это не частая ошибка
+        if "can't parse entities" not in str(e):
+            try:
+                await bot.send_message(ADMIN_ID, f"⚠️ Ошибка отправки в группу!\n\n{e}")
+            except:
+                pass
         return False
 
 # --- ОБРАБОТЧИКИ ---
@@ -383,11 +395,11 @@ async def spin_wheel(callback: types.CallbackQuery):
             win_text = f"+{prize_value}\nTMT"
             result_text = f"🎉 *Siz {prize_value} TMT gazandyňyz!* 🎉"
             
-            # Отправляем в группу - ВЫИГРЫШ
+            # Отправляем в группу - ВЫИГРЫШ (без Markdown)
             group_text = (
-                f"🎉 *Ýeňiş!* 🎉\n\n"
+                f"🎉 Ýeňiş! 🎉\n\n"
                 f"👤 @{username} ({full_name})\n"
-                f"💰 *{prize_value} TMT* gazandy!\n"
+                f"💰 {prize_value} TMT gazandy!\n"
                 f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
                 f"Balans doldurmak üçin: @astra_kassa"
             )
@@ -398,11 +410,11 @@ async def spin_wheel(callback: types.CallbackQuery):
             win_text = "0\nTMT"
             result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
             
-            # Отправляем в группу - ПРОИГРЫШ
+            # Отправляем в группу - ПРОИГРЫШ (без Markdown)
             group_text = (
-                f"😞 *Şowsuzlyk!* 😞\n\n"
+                f"😞 Şowsuzlyk! 😞\n\n"
                 f"👤 @{username} ({full_name})\n"
-                f"💰 *0 TMT* gazandy!\n"
+                f"💰 0 TMT gazandy!\n"
                 f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
                 f"Ertir täzeden synanyşar!"
             )
@@ -578,7 +590,8 @@ async def add_balance(message: types.Message):
                     f"Tekerleme aýlap görüň! 🎡",
                     parse_mode="Markdown"
                 )
-                await send_to_group(f"💰 *Balans dolduryldy!*\n\n👤 {full_name or user_id}\n+{amount} TMT")
+                # Отправляем в группу без Markdown
+                await send_to_group(f"💰 Balans dolduryldy!\n\n👤 {full_name or user_id}\n+{amount} TMT")
             except:
                 pass
         else:
@@ -612,7 +625,7 @@ async def test_group(message: types.Message):
         await message.answer("⛔ Bu buýruk diňe administrator üçin!")
         return
     
-    result = await send_to_group("🧪 *Test habar! Bot işleýär!*")
+    result = await send_to_group("🧪 Test habar! Bot işleýär!")
     if result:
         await message.answer("✅ Test habar gruppa iberildi!")
     else:
