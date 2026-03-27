@@ -3,6 +3,7 @@ import random
 import sqlite3
 import logging
 import sys
+import os
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -18,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 # --- КОНФИГУРАЦИЯ ---
 API_TOKEN = "8274028629:AAGOTRJWn9Ua6Es2ajdeRajwzZgnlkLctbQ"  # ВСТАВЬТЕ ВАШ ТОКЕН
 ADMIN_ID = 8210954671  # ВАШ ID
-GROUP_ID = -1003795197483  # ID ГРУППЫ ДЛЯ УВЕДОМЛЕНИЙ (отрицательное число)
+GROUP_ID = -1003795197483  # ID ГРУППЫ ДЛЯ УВЕДОМЛЕНИЙ
 
 # Пути к файлам
 DB_NAME = "fortune_bot.db"
@@ -95,7 +96,6 @@ def get_user(user_id, username=None, full_name=None):
             conn.close()
             return result
         else:
-            # Создаем нового пользователя
             cursor.execute("INSERT INTO users (user_id, username, full_name, balance, spins_count) VALUES (?, ?, ?, ?, ?)", 
                           (user_id, username, full_name, 0, 0))
             conn.commit()
@@ -139,7 +139,6 @@ def can_spin(user_id, last_spin_str):
         return True
 
 def get_random_sector():
-    """Выбор сектора с учетом вероятностей"""
     rand_num = random.uniform(0, 100)
     cumulative = 0
     for sector in SECTORS:
@@ -150,7 +149,6 @@ def get_random_sector():
 
 # --- ГЕНЕРАЦИЯ КОЛЕСА ---
 def draw_wheel(selected_index, win_text):
-    """Рисует круглое колесо с текстом выигрыша"""
     try:
         width, height = 800, 800
         center = (width // 2, height // 2)
@@ -162,7 +160,6 @@ def draw_wheel(selected_index, win_text):
         angle_per_sector = 360 / len(SECTORS)
         start_angle = -90
         
-        # Загружаем шрифт
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
             big_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 36)
@@ -174,7 +171,6 @@ def draw_wheel(selected_index, win_text):
                 font = ImageFont.load_default()
                 big_font = ImageFont.load_default()
         
-        # Рисуем сектора
         for i, sector in enumerate(SECTORS):
             angle1 = start_angle + i * angle_per_sector
             angle2 = start_angle + (i + 1) * angle_per_sector
@@ -187,7 +183,6 @@ def draw_wheel(selected_index, win_text):
                            center[0] + radius, center[1] + radius],
                           start=angle1, end=angle2, fill=color, outline="gold", width=3)
             
-            # Текст внутри сектора
             mid_angle = angle1 + angle_per_sector / 2
             text_rad = radius * 0.7
             text_x = center[0] + text_rad * (mid_angle / 180 * 3.14159)
@@ -198,7 +193,6 @@ def draw_wheel(selected_index, win_text):
             draw.text((text_x - (bbox[2]-bbox[0])//2, text_y - (bbox[3]-bbox[1])//2), 
                      text, fill="white", font=font)
         
-        # Рисуем стрелку
         arrow_points = [
             (center[0] - 25, center[1] - radius - 15),
             (center[0] + 25, center[1] - radius - 15),
@@ -206,11 +200,9 @@ def draw_wheel(selected_index, win_text):
         ]
         draw.polygon(arrow_points, fill="red", outline="yellow", width=3)
         
-        # Центральный круг с текстом выигрыша
         draw.ellipse([center[0] - 80, center[1] - 80, center[0] + 80, center[1] + 80], 
                      fill="gold", outline="orange", width=3)
         
-        # Пишем текст выигрыша в центре
         lines = win_text.split('\n')
         y_offset = center[1] - 20
         for line in lines:
@@ -254,7 +246,6 @@ async def start_command(message: types.Message):
         )
         
         await message.answer(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-        logger.info(f"Ответ отправлен пользователю {user_id}")
         
     except Exception as e:
         logger.error(f"Ошибка в start_command: {e}")
@@ -290,7 +281,8 @@ async def show_wins(callback: types.CallbackQuery):
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка в show_wins: {e}")
-        await callback.answer("⚠️ Ýalňyşlyk!", show_alert=True)
+        await callback.message.edit_text("⚠️ Ýalňyşlyk! Soňra synanyşyň.", reply_markup=main_menu_keyboard())
+        await callback.answer()
 
 @dp.callback_query(F.data == "spin")
 async def spin_wheel(callback: types.CallbackQuery):
@@ -303,13 +295,15 @@ async def spin_wheel(callback: types.CallbackQuery):
         
         # Проверка на лимит
         if not can_spin(user_id, last_spin_str):
-            last_spin = datetime.fromisoformat(last_spin_str)
-            next_spin = last_spin + timedelta(days=1)
-            wait_seconds = (next_spin - datetime.now()).seconds
-            hours = wait_seconds // 3600
-            minutes = (wait_seconds % 3600) // 60
-            
-            await callback.answer(f"⏳ Siz şu gün aýladyňyz! Indiki gezek {hours} sagat {minutes} minutdan soň.", show_alert=True)
+            if last_spin_str:
+                last_spin = datetime.fromisoformat(last_spin_str)
+                next_spin = last_spin + timedelta(days=1)
+                wait_seconds = (next_spin - datetime.now()).seconds
+                hours = wait_seconds // 3600
+                minutes = (wait_seconds % 3600) // 60
+                await callback.answer(f"⏳ Siz şu gün aýladyňyz! Indiki gezek {hours} sagat {minutes} minutdan soň.", show_alert=True)
+            else:
+                await callback.answer("⏳ Siz şu gün aýladyňyz! Ertir synanyşyň.", show_alert=True)
             return
         
         await callback.answer("🎡 Tekerleme aýlanýar...")
@@ -333,25 +327,31 @@ async def spin_wheel(callback: types.CallbackQuery):
                 win_text = f"+{reward}\nTMT"
                 result_text = f"🎉 *Siz {reward} TMT gazandyňyz!* 🎉"
                 # Отправляем уведомление в группу
-                await bot.send_message(
-                    GROUP_ID,
-                    f"🎉 *Ýeňiş!* 🎉\n\n"
-                    f"👤 @{username} ({full_name})\n"
-                    f"💰 {reward} TMT gazandy!\n"
-                    f"🏆 Promo{reward} TMT\n\n"
-                    f"Balans doldurmak üçin: @astra_kassa"
-                )
+                try:
+                    await bot.send_message(
+                        GROUP_ID,
+                        f"🎉 *Ýeňiş!* 🎉\n\n"
+                        f"👤 @{username} ({full_name})\n"
+                        f"💰 {reward} TMT gazandy!\n"
+                        f"🏆 Promo{reward} TMT\n\n"
+                        f"Balans doldurmak üçin: @astra_kassa"
+                    )
+                except:
+                    logger.warning("Не удалось отправить сообщение в группу")
             else:
                 win_text = "0\nTMT"
                 result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
                 # Отправляем уведомление в группу
-                await bot.send_message(
-                    GROUP_ID,
-                    f"😞 *Şowsuzlyk!* 😞\n\n"
-                    f"👤 @{username} ({full_name})\n"
-                    f"💰 0 TMT gazandy!\n\n"
-                    f"Ertir täzeden synanyşar!"
-                )
+                try:
+                    await bot.send_message(
+                        GROUP_ID,
+                        f"😞 *Şowsuzlyk!* 😞\n\n"
+                        f"👤 @{username} ({full_name})\n"
+                        f"💰 0 TMT gazandy!\n\n"
+                        f"Ertir täzeden synanyşar!"
+                    )
+                except:
+                    logger.warning("Не удалось отправить сообщение в группу")
         
         elif selected_sector["type"] == "bonus":
             reward = 5
@@ -361,39 +361,53 @@ async def spin_wheel(callback: types.CallbackQuery):
             win_text = "+10%\nBonus"
             result_text = f"⭐ *Depozit +10% bonus gazandyňyz!* ⭐\nBalansyňyza 5 TMT goşuldy!\n\nDepozit edeniňizde +10% goşmaça alarsyňyz!"
             # Отправляем уведомление в группу
-            await bot.send_message(
-                GROUP_ID,
-                f"⭐ *Bonus!* ⭐\n\n"
-                f"👤 @{username} ({full_name})\n"
-                f"🎁 Depozit +10% bonus gazandy!\n"
-                f"💰 +5 TMT balansyna goşuldy!\n\n"
-                f"Gutlaýarys! 🎉"
-            )
+            try:
+                await bot.send_message(
+                    GROUP_ID,
+                    f"⭐ *Bonus!* ⭐\n\n"
+                    f"👤 @{username} ({full_name})\n"
+                    f"🎁 Depozit +10% bonus gazandy!\n"
+                    f"💰 +5 TMT balansyna goşuldy!\n\n"
+                    f"Gutlaýarys! 🎉"
+                )
+            except:
+                logger.warning("Не удалось отправить сообщение в группу")
         
-        # Рисуем колесо с текстом выигрыша
+        # Рисуем колесо
         wheel_img = draw_wheel(selected_index, win_text)
         
+        # Сохраняем в БД
+        save_spin_history(user_id, selected_sector["type"], selected_sector["value"] if selected_sector["type"] == "prize" else 0)
+        update_user(user_id, balance, total_won, datetime.now().isoformat(), spins_count)
+        
+        # Отправляем результат
         if wheel_img:
+            # Сохраняем временный файл
             wheel_img.save(WHEEL_IMAGE_PATH)
-            await bot.send_photo(
-                chat_id=user_id, 
-                photo=FSInputFile(WHEEL_IMAGE_PATH), 
-                caption=result_text,
-                parse_mode="Markdown",
-                reply_markup=main_menu_keyboard()
+            
+            # Создаем новое сообщение с фото, а не редактируем старое
+            await callback.message.delete()
+            await callback.message.answer_photo(
+                photo=FSInputFile(WHEEL_IMAGE_PATH),
+                caption=f"{result_text}\n\n💰 *Täze balans:* {balance} TMT\n🏆 *Jemi ýeňiş:* {total_won} TMT",
+                reply_markup=main_menu_keyboard(),
+                parse_mode="Markdown"
             )
+            
+            # Удаляем временный файл
+            try:
+                os.remove(WHEEL_IMAGE_PATH)
+            except:
+                pass
         else:
-            await callback.message.answer(
+            # Если не удалось создать изображение, отправляем текст
+            await callback.message.edit_text(
                 f"{result_text}\n\n"
                 f"💰 *Täze balans:* {balance} TMT\n"
                 f"🏆 *Jemi ýeňiş:* {total_won} TMT",
                 reply_markup=main_menu_keyboard(),
                 parse_mode="Markdown"
             )
-        
-        # Сохраняем в БД
-        save_spin_history(user_id, selected_sector["type"], selected_sector["value"] if selected_sector["type"] == "prize" else 0)
-        update_user(user_id, balance, total_won, datetime.now().isoformat(), spins_count)
         
         # Если выигрыш больше 0, отправляем дополнительное сообщение с контактом админа
         if reward > 0:
@@ -407,40 +421,58 @@ async def spin_wheel(callback: types.CallbackQuery):
         logger.info(f"Пользователь {user_id} выиграл {reward} TMT")
         
     except Exception as e:
-        logger.error(f"Ошибка в spin_wheel: {e}")
-        await callback.message.answer("⚠️ Tekniki ýalňyşlyk! Soňra synanyşyň.")
-        await callback.answer()
+        logger.error(f"Ошибка в spin_wheel: {e}", exc_info=True)
+        try:
+            await callback.message.answer("⚠️ Tekniki ýalňyşlyk! Soňra synanyşyň.")
+        except:
+            pass
+        await callback.answer("⚠️ Ýalňyşlyk boldy!", show_alert=True)
 
-# --- АДМИН КОМАНДЫ ДЛЯ ПОПОЛНЕНИЯ БАЛАНСА ---
+# --- АДМИН КОМАНДЫ ---
 @dp.message(Command("add"))
 async def add_balance(message: types.Message):
     if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Bu buýruk diňe administrator üçin!")
         return
     
     try:
         args = message.text.split()
         if len(args) != 3:
-            await message.answer("Formula: /add user_id 100")
+            await message.answer("Formula: /add user_id 100\n\nMysal: /add 123456789 50")
             return
         
         user_id = int(args[1])
         amount = int(args[2])
         
+        if amount <= 0:
+            await message.answer("⚠️ Mukdar 0-dan uly bolmaly!")
+            return
+        
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT balance, full_name FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         
         if result:
-            new_balance = result[0] + amount
+            current_balance, full_name = result
+            new_balance = current_balance + amount
             cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
             conn.commit()
-            await message.answer(f"✅ {user_id} ID-li ulanyjynyň balansy {amount} TMT artyp, {new_balance} TMT boldy!")
+            await message.answer(f"✅ *Balans dolduryldy!*\n\n"
+                               f"👤 Ulanyjy: {full_name or user_id}\n"
+                               f"💰 Köne balans: {current_balance} TMT\n"
+                               f"💵 Goşulan: +{amount} TMT\n"
+                               f"💰 Täze balans: {new_balance} TMT",
+                               parse_mode="Markdown")
             
             try:
                 await bot.send_message(
                     user_id, 
-                    f"💰 Balansyňyz {amount} TMT bilen dolduryldy!\nTäze balans: {new_balance} TMT\n\nTekerleme aýlap görüň! 🎡"
+                    f"💰 *Balansyňyz dolduryldy!*\n\n"
+                    f"Goşulan: +{amount} TMT\n"
+                    f"Täze balans: {new_balance} TMT\n\n"
+                    f"Tekerleme aýlap görüň! 🎡",
+                    parse_mode="Markdown"
                 )
             except:
                 pass
@@ -448,33 +480,30 @@ async def add_balance(message: types.Message):
             await message.answer(f"❌ {user_id} ID-li ulanyjy tapylmady!")
         
         conn.close()
+    except ValueError:
+        await message.answer("❌ Ýalňyş format! ID we san dogry ýazyň.\nMysal: /add 123456789 50")
     except Exception as e:
         logger.error(f"Ошибка в add_balance: {e}")
-        await message.answer("⚠️ Ýalňyşlyk! ID we san dogry ýazyň.")
+        await message.answer("⚠️ Ýalňyşlyk boldy!")
 
 # --- ЗАПУСК ---
 async def main():
-    """Главная функция запуска бота"""
     logger.info("🚀 Запуск бота Astra Kassa Tekerleme...")
     
-    # Инициализация БД
     if not init_db():
         logger.error("Не удалось инициализировать базу данных!")
         return
     
-    # Проверка токена
     if API_TOKEN == "ВАШ_ТОКЕН_БОТА":
-        logger.error("⚠️ ВНИМАНИЕ: Не установлен API_TOKEN бота!")
+        logger.error("⚠️ Не установлен API_TOKEN бота!")
         print("\n" + "="*50)
         print("⚠️  ОШИБКА: Не установлен токен бота!")
         print("Измените API_TOKEN в файле bot.py на ваш токен")
-        print("Получить токен можно у @BotFather")
         print("="*50 + "\n")
         return
     
-    # Проверка GROUP_ID
     if GROUP_ID == -100123456789:
-        logger.warning("⚠️ ВНИМАНИЕ: Не установлен GROUP_ID!")
+        logger.warning("⚠️ Не установлен GROUP_ID!")
         print("\n" + "="*50)
         print("⚠️  ВНИМАНИЕ: Не установлен ID группы для уведомлений!")
         print("1. Добавьте бота в группу")
@@ -483,11 +512,10 @@ async def main():
         print("4. Укажите GROUP_ID в файле bot.py")
         print("="*50 + "\n")
     
-    logger.info(f"✅ Бот запущен с токеном: {API_TOKEN[:10]}...")
+    logger.info(f"✅ Бот запущен")
     logger.info(f"👑 Администратор ID: {ADMIN_ID}")
     logger.info(f"📢 Группа для уведомлений ID: {GROUP_ID}")
     
-    # Запуск поллинга
     try:
         await dp.start_polling(bot)
     except Exception as e:
