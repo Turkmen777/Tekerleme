@@ -17,9 +17,9 @@ from aiogram import F
 from PIL import Image, ImageDraw, ImageFont
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = "8274028629:AAGOTRJWn9Ua6Es2ajdeRajwzZgnlkLctbQ"  # ВСТАВЬТЕ ВАШ ТОКЕН
-ADMIN_ID = 8210954671  # ВАШ ID
-GROUP_ID = -1003795197483  # ID ГРУППЫ ДЛЯ УВЕДОМЛЕНИЙ
+API_TOKEN = "8274028629:AAGOTRJWn9Ua6Es2ajdeRajwzZgnlkLctbQ"
+ADMIN_ID = 8210954671
+GROUP_ID = -1003795197483  # ID группы для уведомлений
 
 # Пути к файлам
 DB_NAME = "fortune_bot.db"
@@ -48,9 +48,6 @@ SECTORS = [
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-# Глобальный счетчик для отслеживания проигрышей
-# Будем хранить в БД общий счетчик проигрышей
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def init_db():
@@ -188,27 +185,20 @@ def get_prize_by_counter(lose_count):
     Определяет какой приз выпадает на основе счетчика проигрышей
     Возвращает: (prize_value, is_win)
     """
-    # Определяем какой цикл выигрыша сейчас (начиная с 0)
-    # Циклы: 0-39 проигрыш, 40-й выигрыш 5, 41-79 проигрыш, 80-й выигрыш 10, 81-119 проигрыш, 120-й выигрыш 20
-    # 121-159 проигрыш, 160-й выигрыш 5, 161-199 проигрыш, 200-й выигрыш 10, 201-239 проигрыш, 240-й выигрыш 20 и т.д.
-    
-    # Номер текущего спина (начиная с 1)
     spin_number = lose_count + 1
     
-    # Проверяем, является ли текущий спин выигрышным
     # Выигрышные спины: 40, 80, 120, 160, 200, 240, 280...
     if spin_number % 40 == 0:
-        # Определяем какой по счету выигрыш (1-й, 2-й, 3-й...)
         win_cycle = spin_number // 40
-        # Цикл выигрышей: 1->5, 2->10, 3->20, 4->5, 5->10, 6->20, 7->5...
+        # Цикл выигрышей: 1->5, 2->10, 3->20, 4->5, 5->10, 6->20...
         if win_cycle % 3 == 1:
-            return 5, True  # 5 TMT
+            return 5, True
         elif win_cycle % 3 == 2:
-            return 10, True  # 10 TMT
+            return 10, True
         else:
-            return 20, True  # 20 TMT
+            return 20, True
     else:
-        return 0, False  # Проигрыш
+        return 0, False
 
 # --- ГЕНЕРАЦИЯ КОЛЕСА ---
 def draw_wheel(selected_index, win_text):
@@ -286,6 +276,22 @@ def main_menu_keyboard():
     ])
     return kb
 
+# --- ФУНКЦИЯ ДЛЯ ОТПРАВКИ В ГРУППУ С ПРОВЕРКОЙ ---
+async def send_to_group(text, parse_mode="Markdown"):
+    """Отправка сообщения в группу с обработкой ошибок"""
+    try:
+        await bot.send_message(GROUP_ID, text, parse_mode=parse_mode)
+        logger.info(f"Сообщение отправлено в группу: {text[:50]}...")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка отправки в группу: {e}")
+        # Если ошибка, пробуем отправить админу в личку
+        try:
+            await bot.send_message(ADMIN_ID, f"⚠️ Ошибка отправки в группу!\n\nТекст: {text[:100]}\n\nОшибка: {e}")
+        except:
+            pass
+        return False
+
 # --- ОБРАБОТЧИКИ ---
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
@@ -310,6 +316,10 @@ async def start_command(message: types.Message):
         )
         
         await message.answer(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        
+        # Проверяем отправку в группу при старте (для теста)
+        if user_id == ADMIN_ID:
+            await send_to_group("✅ Бот запущен и готов к работе!")
         
     except Exception as e:
         logger.error(f"Ошибка в start_command: {e}")
@@ -392,31 +402,33 @@ async def spin_wheel(callback: types.CallbackQuery):
             result_text = f"🎉 *Siz {prize_value} TMT gazandyňyz!* 🎉"
             
             # Отправляем уведомление в группу
-            try:
-                await bot.send_message(
-                    GROUP_ID,
-                    f"🎉 *Ýeňiş!* 🎉\n\n"
-                    f"👤 @{username} ({full_name})\n"
-                    f"💰 {prize_value} TMT gazandy!\n"
-                    f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
-                    f"Balans doldurmak üçin: @astra_kassa"
-                )
-            except:
-                logger.warning("Не удалось отправить сообщение в группу")
+            group_text = (
+                f"🎉 *Ýeňiş!* 🎉\n\n"
+                f"👤 @{username} ({full_name})\n"
+                f"💰 {prize_value} TMT gazandy!\n"
+                f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
+                f"Balans doldurmak üçin: @astra_kassa"
+            )
+            await send_to_group(group_text)
         else:
             prize_value = 0
             win_text = "0\nTMT"
             result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
+            
+            # Отправляем уведомление о проигрыше в группу (опционально)
+            # Раскомментируйте если нужно отправлять проигрыши
+            # group_text = f"😞 *Şowsuzlyk!* 😞\n\n👤 @{username} - 0 TMT\n🏆 Jemi aýlanma: {lose_count + 1}"
+            # await send_to_group(group_text)
         
         # Находим индекс сектора для отображения
         if prize_value == 0:
-            selected_index = 0  # 0 TMT
+            selected_index = 0
         elif prize_value == 5:
-            selected_index = 1  # 5 TMT
+            selected_index = 1
         elif prize_value == 10:
-            selected_index = 2  # 10 TMT
+            selected_index = 2
         else:
-            selected_index = 3  # 20 TMT
+            selected_index = 3
         
         spins_count += 1
         
@@ -478,7 +490,7 @@ async def spin_wheel(callback: types.CallbackQuery):
 # --- АДМИН КОМАНДЫ ---
 @dp.message(Command("stats"))
 async def show_stats(message: types.Message):
-    if message.from_user.id != 8210954671:
+    if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Bu buýruk diňe administrator üçin!")
         return
     
@@ -579,6 +591,8 @@ async def add_balance(message: types.Message):
                     f"Tekerleme aýlap görüň! 🎡",
                     parse_mode="Markdown"
                 )
+                # Отправляем уведомление в группу о пополнении
+                await send_to_group(f"💰 *Balans dolduryldy!*\n\n👤 {full_name or user_id}\n+{amount} TMT")
             except:
                 pass
         else:
@@ -601,10 +615,24 @@ async def reset_counter(message: types.Message):
     try:
         update_global_counter(0, 0)
         await message.answer("✅ Global hasaplaýjy sıfyrlandy!")
+        await send_to_group("🔄 Global hasaplaýjy sıfyrlandy!")
         logger.info("Глобальный счетчик сброшен администратором")
     except Exception as e:
         logger.error(f"Ошибка сброса счетчика: {e}")
         await message.answer("⚠️ Ýalňyşlyk boldy!")
+
+@dp.message(Command("testgroup"))
+async def test_group(message: types.Message):
+    """Тест отправки в группу"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Bu buýruk diňe administrator üçin!")
+        return
+    
+    result = await send_to_group("🧪 *Test habar!* Bot işleýär!")
+    if result:
+        await message.answer("✅ Test habar gruppa iberildi!")
+    else:
+        await message.answer("❌ Test habar iberilmedi! Bot gruppa goşulanmy? Bot-a rugsat berlenmi?")
 
 # --- ЗАПУСК ---
 async def main():
@@ -614,18 +642,17 @@ async def main():
         logger.error("Не удалось инициализировать базу данных!")
         return
     
-    if API_TOKEN == "ВАШ_ТОКЕН_БОТА":
-        logger.error("⚠️ Не установлен API_TOKEN бота!")
-        print("\n" + "="*50)
-        print("⚠️  ОШИБКА: Не установлен токен бота!")
-        print("Измените API_TOKEN в файле bot.py на ваш токен")
-        print("="*50 + "\n")
-        return
-    
     lose_count, _ = get_global_counter()
     logger.info(f"✅ Бот запущен")
     logger.info(f"👑 Администратор ID: {ADMIN_ID}")
     logger.info(f"📊 Текущий счетчик проигрышей: {lose_count}")
+    logger.info(f"📢 Группа ID: {GROUP_ID}")
+    
+    # Отправляем тестовое сообщение админу
+    try:
+        await bot.send_message(ADMIN_ID, "✅ Бот успешно запущен!\n\nКоманды:\n/stats - статистика\n/add - пополнение баланса\n/reset - сброс счетчика\n/testgroup - тест отправки в группу")
+    except:
+        pass
     
     try:
         await dp.start_polling(bot)
