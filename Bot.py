@@ -178,7 +178,7 @@ def can_spin(user_id, last_spin_str):
         return True
     try:
         last_spin = datetime.fromisoformat(last_spin_str)
-        return datetime.now() > last_spin + timedelta(days=1)
+        return datetime.now() > last_spin + timedelta(days=10)
     except:
         return True
 
