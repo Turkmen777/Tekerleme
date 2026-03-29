@@ -49,14 +49,6 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ЭКРАНИРОВАНИЯ ТЕКСТА ---
-def escape_markdown(text):
-    """Экранирует специальные символы для Markdown"""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def init_db():
     try:
@@ -173,12 +165,13 @@ def update_global_counter(lose_count, last_win_cycle):
         logger.error(f"Ошибка обновления счетчика: {e}")
         return False
 
+# ИСПРАВЛЕНО: теперь можно крутить каждые 2 часа (вместо 24 часов)
 def can_spin(user_id, last_spin_str):
     if not last_spin_str:
         return True
     try:
         last_spin = datetime.fromisoformat(last_spin_str)
-        return datetime.now() > last_spin + timedelta(days=10)
+        return datetime.now() > last_spin + timedelta(hours=2)
     except:
         return True
 
@@ -273,22 +266,15 @@ def main_menu_keyboard():
     ])
     return kb
 
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОТПРАВКИ В ГРУППУ (БЕЗ MARKDOWN) ---
+# --- ФУНКЦИЯ ОТПРАВКИ В ГРУППУ ---
 async def send_to_group(text):
     """Отправка сообщения в группу без Markdown"""
     try:
-        # Отправляем обычным текстом, без форматирования
         await bot.send_message(GROUP_ID, text, parse_mode=None)
         logger.info(f"Сообщение отправлено в группу")
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки в группу: {e}")
-        # Отправляем ошибку админу только если это не частая ошибка
-        if "can't parse entities" not in str(e):
-            try:
-                await bot.send_message(ADMIN_ID, f"⚠️ Ошибка отправки в группу!\n\n{e}")
-            except:
-                pass
         return False
 
 # --- ОБРАБОТЧИКИ ---
@@ -308,7 +294,7 @@ async def start_command(message: types.Message):
             f"Hormatly {full_name}, hoş geldiňiz! 🎰\n\n"
             "Sizi günlik tekerleme oýnuna çagyrýarys!\n\n"
             "✨ *Düzgünler:*\n"
-            "• Her gün 1 gezek aýlap bilersiňiz\n"
+            "• Her 2 sagatda 1 gezek aýlap bilersiňiz\n"
             "• Astra kassa siz bilendir\n"
             "• Baýraklar: 5 TMT, 10 TMT, 20 TMT\n\n"
             "Aşakdaky düwmä basyp, tekerleme aýlaň! 🎡"
@@ -367,17 +353,17 @@ async def spin_wheel(callback: types.CallbackQuery):
         
         balance, total_won, last_spin_str, spins_count = get_user(user_id)
         
-        # Проверка на лимит
+        # Проверка на лимит (теперь 2 часа)
         if not can_spin(user_id, last_spin_str):
             if last_spin_str:
                 last_spin = datetime.fromisoformat(last_spin_str)
-                next_spin = last_spin + timedelta(days=1)
+                next_spin = last_spin + timedelta(hours=2)
                 wait_seconds = (next_spin - datetime.now()).seconds
                 hours = wait_seconds // 3600
                 minutes = (wait_seconds % 3600) // 60
                 await callback.answer(f"⏳ Siz şu gün aýladyňyz! Indiki gezek {hours} sagat {minutes} minutdan soň.", show_alert=True)
             else:
-                await callback.answer("⏳ Siz şu gün aýladyňyz! Ertir synanyşyň.", show_alert=True)
+                await callback.answer("⏳ Siz şu gün aýladyňyz! 2 sagatdan soň synanyşyň.", show_alert=True)
             return
         
         await callback.answer("🎡 Tekerleme aýlanýar...")
@@ -395,7 +381,7 @@ async def spin_wheel(callback: types.CallbackQuery):
             win_text = f"+{prize_value}\nTMT"
             result_text = f"🎉 *Siz {prize_value} TMT gazandyňyz!* 🎉"
             
-            # Отправляем в группу - ВЫИГРЫШ (без Markdown)
+            # Отправляем в группу - ВЫИГРЫШ
             group_text = (
                 f"🎉 Ýeňiş! 🎉\n\n"
                 f"👤 @{username} ({full_name})\n"
@@ -408,15 +394,15 @@ async def spin_wheel(callback: types.CallbackQuery):
         else:
             prize_value = 0
             win_text = "0\nTMT"
-            result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, ertir synanyşyň!"
+            result_text = f"😞 *Siz 0 TMT gazandyňyz!* 😞\nŞowly gün däl, 2 sagatdan soň synanyşyň!"
             
-            # Отправляем в группу - ПРОИГРЫШ (без Markdown)
+            # Отправляем в группу - ПРОИГРЫШ
             group_text = (
                 f"😞 Şowsuzlyk! 😞\n\n"
                 f"👤 @{username} ({full_name})\n"
                 f"💰 0 TMT gazandy!\n"
                 f"🏆 Jemi aýlanma: {lose_count + 1}\n\n"
-                f"Ertir täzeden synanyşar!"
+                f"2 sagatdan soň täzeden synanyşar!"
             )
             await send_to_group(group_text)
         
@@ -590,7 +576,6 @@ async def add_balance(message: types.Message):
                     f"Tekerleme aýlap görüň! 🎡",
                     parse_mode="Markdown"
                 )
-                # Отправляем в группу без Markdown
                 await send_to_group(f"💰 Balans dolduryldy!\n\n👤 {full_name or user_id}\n+{amount} TMT")
             except:
                 pass
